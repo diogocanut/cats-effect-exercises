@@ -11,11 +11,6 @@ import cats.effect.concurrent.{MVar, Ref}
 object WorkerPool extends IOApp {
 
   type Worker[F[_], A, B] = A => F[B]
-  val testPool: IO[WorkerPool[IO, Int, Int]] =
-    List
-      .range(0, 10)
-      .traverse(mkWorker[IO])
-      .flatMap(WorkerPool.of[IO, Int, Int])
 
   def mkWorker[F[_]](id: Int)(implicit timer: Timer[F], CE: Concurrent[F]): F[Worker[F, Int, Int]] =
     Ref[F].of(0).map { counter =>
@@ -32,31 +27,23 @@ object WorkerPool extends IOApp {
           CE.pure(x + 1)
     }
 
-  def run(args: List[String]): IO[ExitCode] =
-    for {
-      pool <- testPool
-      _    <- pool.exec(42).replicateA(20).start
-    } yield ExitCode.Success
-
   trait WorkerPool[F[_], A, B] {
     def exec(a: A): F[B]
-
     def add(worker: Worker[F, A, B]): F[Unit]
-
     def removeAll: F[Unit]
   }
 
   object WorkerPool {
 
-
     def of[F[_] : Concurrent, A, B](fs: List[Worker[F, A, B]]): F[WorkerPool[F, A, B]] = for {
       reference <- Ref[F].of(fs)
-      queue <- MVar.empty[F, Worker[F, A, B]]
-      _ <- fs.map(queue.put).map(_.start.void).sequence
+      queue     <- MVar.empty[F, Worker[F, A, B]]
+      _         <- fs.map(queue.put).map(_.start.void).sequence
+
       workerPool = new WorkerPool[F, A, B] {
         def exec(a: A): F[B] = for {
           worker <- queue.take
-          b <- worker.apply(a).guarantee(putBack(worker))
+          b      <- worker.apply(a).guarantee(putBack(worker))
         } yield b
 
         def add(worker: Worker[F, A, B]): F[Unit] =
@@ -67,11 +54,22 @@ object WorkerPool extends IOApp {
 
         private def putBack(worker: Worker[F, A, B]): F[Unit] = for {
           contains <- reference.get.map(_.contains(worker))
-          _ <- if (contains) queue.put(worker).start.void else Concurrent[F].unit
+          _        <- if (contains) queue.put(worker).start.void else Concurrent[F].unit
         } yield ()
 
       }
     } yield workerPool
   }
 
+  val testPool: IO[WorkerPool[IO, Int, Int]] =
+    List
+      .range(0, 10)
+      .traverse(mkWorker[IO])
+      .flatMap(WorkerPool.of[IO, Int, Int])
+
+  def run(args: List[String]): IO[ExitCode] =
+    for {
+      pool <- testPool
+      _    <- pool.exec(42).replicateA(20)
+    } yield ExitCode.Success
 }
